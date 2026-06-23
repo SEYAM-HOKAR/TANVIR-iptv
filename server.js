@@ -1,10 +1,55 @@
-const http = require('http');
+const http = require('https');
+const httpPlain = require('http');
 const fs = require('fs');
 const path = require('path');
 
 const PORT = 5000;
 const HOST = '0.0.0.0';
 const STREAMS_DIR = path.join(__dirname, 'streams');
+
+// Logo map: channelId (e.g. "AnandaTV.bd") → logo URL
+let logoMap = {};
+
+function fetchJSON(url) {
+  return new Promise((resolve, reject) => {
+    http.get(url, { headers: { 'User-Agent': 'node' } }, (res) => {
+      let data = '';
+      res.on('data', chunk => data += chunk);
+      res.on('end', () => {
+        try { resolve(JSON.parse(data)); }
+        catch (e) { reject(e); }
+      });
+    }).on('error', reject);
+  });
+}
+
+async function buildLogoMap() {
+  try {
+    console.log('Fetching channel logo data from iptv-org...');
+    const channels = await fetchJSON('https://iptv-org.github.io/api/channels.json');
+    let count = 0;
+    for (const ch of channels) {
+      if (ch.id && ch.website) {
+        try {
+          const url = new URL(ch.website);
+          const domain = url.hostname.replace(/^www\./, '');
+          logoMap[ch.id.toLowerCase()] = `https://t1.gstatic.com/faviconV2?client=SOCIAL&type=FAVICON&fallback_opts=TYPE,SIZE,URL&url=https://${domain}&size=128`;
+          count++;
+        } catch (e) {}
+      }
+    }
+    console.log(`Logo map built: ${count} entries`);
+  } catch (e) {
+    console.warn('Could not fetch logo data:', e.message);
+  }
+}
+
+function getLogo(tvgId) {
+  if (!tvgId) return null;
+  // tvg-id format: "AnandaTV.bd@SD" — strip quality suffix
+  const id = tvgId.split('@')[0].toLowerCase();
+  return logoMap[id] || null;
+}
 
 function getCategoryFromChannel(name, tvgId, country) {
   const n = name.toLowerCase();
@@ -15,7 +60,7 @@ function getCategoryFromChannel(name, tvgId, country) {
   if (/kids|cartoon|disney|nick|pogo|baby|cbeebies|toonami|hungama|nickelodeon/i.test(n + id)) return 'Kids';
   if (/music|mtv|vh1|hits|channel v|9xm|b4u music|9x|tashan|jalwa|ishara|zing|music asia|9x jhakaas|sonic|song/i.test(n + id)) return 'Music';
   if (/movie|cinema|film|star movies|zee cinema|sony max|hbo|zee action|romedy|epic|&pictures|afl|premiere|plex movies/i.test(n + id)) return 'Movies';
-  if (/islamic|quran|peace tv|faith|iqra|god|huda|madani|noor|spiritua|buddhist|religious|god|pray/i.test(n + id)) return 'Religious';
+  if (/islamic|quran|peace tv|faith|iqra|god|huda|madani|noor|spiritua|buddhist|religious|pray/i.test(n + id)) return 'Religious';
   if (/documentary|national geo|discovery|history|animal planet|nat geo|curiosity|dw|france24|nhk/i.test(n + id)) return 'Documentary';
   if (/cook|food|lifestyle|travel|fashion/i.test(n + id)) return 'Lifestyle';
 
@@ -55,48 +100,47 @@ function parseM3U(content, filename, limit) {
       urlLine = next;
       break;
     }
-
     if (!urlLine || urlLine.startsWith('#') || !urlLine.startsWith('http')) continue;
 
     const nameMatch = line.match(/,(.+)$/);
-    const logoMatch = line.match(/tvg-logo="([^"]+)"/);
     const tvgIdMatch = line.match(/tvg-id="([^"]+)"/);
+    const logoInlineMatch = line.match(/tvg-logo="([^"]+)"/);
 
     const name = nameMatch ? nameMatch[1].trim() : 'Unknown';
-    if (name === 'Unknown' || name === '') continue;
+    if (!name || name === 'Unknown') continue;
 
     const tvgId = tvgIdMatch ? tvgIdMatch[1] : '';
-    const logo = logoMatch && logoMatch[1] ? logoMatch[1] : null;
+    // Use inline logo first, then our built logo map, then null
+    const logo = (logoInlineMatch && logoInlineMatch[1]) || getLogo(tvgId) || null;
     const category = getCategoryFromChannel(name, tvgId, country);
 
     channels.push({ name, url: urlLine, logo, categories: [category], country: country.toUpperCase() });
   }
-
   return channels;
 }
 
 function loadAllChannels() {
   const priorityFiles = [
-    { file: 'bd.m3u', limit: null },
-    { file: 'pk.m3u', limit: null },
-    { file: 'sa.m3u', limit: null },
-    { file: 'ae.m3u', limit: null },
-    { file: 'in.m3u', limit: 150 },
-    { file: 'in_doordarshan.m3u', limit: 30 },
-    { file: 'in_pishow.m3u', limit: 50 },
-    { file: 'in_tango.m3u', limit: 40 },
-    { file: 'tr.m3u', limit: 80 },
-    { file: 'kr.m3u', limit: null },
-    { file: 'my.m3u', limit: null },
-    { file: 'us.m3u', limit: 100 },
-    { file: 'us_abcnews.m3u', limit: 20 },
-    { file: 'us_cbsn.m3u', limit: 20 },
-    { file: 'us_pbs.m3u', limit: 20 },
-    { file: 'de.m3u', limit: 80 },
-    { file: 'fr.m3u', limit: 60 },
-    { file: 'it.m3u', limit: 60 },
-    { file: 'ar.m3u', limit: 60 },
-    { file: 'jp.m3u', limit: null },
+    { file: 'bd.m3u',            limit: null },
+    { file: 'pk.m3u',            limit: null },
+    { file: 'sa.m3u',            limit: null },
+    { file: 'ae.m3u',            limit: null },
+    { file: 'in.m3u',            limit: 150  },
+    { file: 'in_doordarshan.m3u',limit: 30   },
+    { file: 'in_pishow.m3u',     limit: 50   },
+    { file: 'in_tango.m3u',      limit: 40   },
+    { file: 'tr.m3u',            limit: 80   },
+    { file: 'kr.m3u',            limit: null },
+    { file: 'my.m3u',            limit: null },
+    { file: 'us.m3u',            limit: 100  },
+    { file: 'us_abcnews.m3u',    limit: 20   },
+    { file: 'us_cbsn.m3u',       limit: 20   },
+    { file: 'us_pbs.m3u',        limit: 20   },
+    { file: 'de.m3u',            limit: 80   },
+    { file: 'fr.m3u',            limit: 60   },
+    { file: 'it.m3u',            limit: 60   },
+    { file: 'ar.m3u',            limit: 60   },
+    { file: 'jp.m3u',            limit: null },
   ];
 
   const allChannels = [];
@@ -127,19 +171,18 @@ let channelsCache = null;
 
 function getChannels() {
   if (!channelsCache) {
-    console.log('Loading channels...');
+    console.log('Loading channels from M3U files...');
     channelsCache = loadAllChannels();
   }
   return channelsCache;
 }
 
-const server = http.createServer((req, res) => {
+const server = httpPlain.createServer((req, res) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
 
   if (req.url === '/api/channels') {
-    const channels = getChannels();
     res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify(channels));
+    res.end(JSON.stringify(getChannels()));
     return;
   }
 
@@ -159,7 +202,17 @@ const server = http.createServer((req, res) => {
   res.end('Not Found');
 });
 
-server.listen(PORT, HOST, () => {
+// Start server, then build logo map and refresh cache
+server.listen(PORT, HOST, async () => {
   console.log(`Server running at http://${HOST}:${PORT}`);
+  // Load channels immediately (without logos) so API responds fast
   getChannels();
+  // Fetch logos in background, then refresh cache with logos
+  await buildLogoMap();
+  if (Object.keys(logoMap).length > 0) {
+    console.log('Refreshing channel cache with logos...');
+    channelsCache = null; // clear cache so next request rebuilds with logos
+    getChannels();        // rebuild now
+    console.log('Channel cache refreshed with logos.');
+  }
 });
